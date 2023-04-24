@@ -25,6 +25,7 @@ use crate::{
 use libp2p::mdns;
 
 use libp2p::{
+    autonat,
     kad::{GetRecordOk, Kademlia, KademliaEvent, QueryResult, K_VALUE},
     multiaddr::Protocol,
     request_response::{self, ResponseChannel as PeerResponseChannel},
@@ -50,6 +51,7 @@ pub(super) struct NodeBehaviour {
     #[cfg(feature = "local-discovery")]
     pub(super) mdns: mdns::tokio::Behaviour,
     pub(super) identify: libp2p::identify::Behaviour,
+    pub(super) autonat: autonat::Behaviour,
 }
 
 #[derive(Debug)]
@@ -59,6 +61,7 @@ pub(super) enum NodeEvent {
     #[cfg(feature = "local-discovery")]
     Mdns(Box<mdns::Event>),
     Identify(Box<libp2p::identify::Event>),
+    Autonat(autonat::Event),
 }
 
 impl From<request_response::Event<Request, Response>> for NodeEvent {
@@ -83,6 +86,12 @@ impl From<mdns::Event> for NodeEvent {
 impl From<libp2p::identify::Event> for NodeEvent {
     fn from(event: libp2p::identify::Event) -> Self {
         NodeEvent::Identify(Box::new(event))
+    }
+}
+
+impl From<autonat::Event> for NodeEvent {
+    fn from(event: autonat::Event) -> Self {
+        NodeEvent::Autonat(event)
     }
 }
 
@@ -320,6 +329,13 @@ impl SwarmDriver {
             }
             SwarmEvent::IncomingConnectionError { .. } => {}
             SwarmEvent::Dialing(peer_id) => info!("Dialing {peer_id}"),
+            SwarmEvent::Behaviour(NodeEvent::Autonat(event)) => match event {
+                autonat::Event::InboundProbe(e) => trace!("AutoNAT inbound probe: {e:?}"),
+                autonat::Event::OutboundProbe(e) => trace!("AutoNAT outbound probe: {e:?}"),
+                autonat::Event::StatusChanged { old, new } => {
+                    info!("AutoNAT status changed: {old:?} -> {new:?}");
+                }
+            },
             todo => error!("SwarmEvent has not been implemented: {todo:?}"),
         }
         Ok(())

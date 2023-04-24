@@ -273,12 +273,15 @@ impl SwarmDriver {
             .multiplex(libp2p::yamux::Config::default())
             .boxed();
 
+        let autonat = libp2p::autonat::Behaviour::new(peer_id, libp2p::autonat::Config::default());
+
         let behaviour = NodeBehaviour {
             request_response,
             kademlia,
             identify,
             #[cfg(feature = "local-discovery")]
             mdns,
+            autonat,
         };
         let swarm = SwarmBuilder::with_tokio_executor(transport, behaviour, peer_id).build();
 
