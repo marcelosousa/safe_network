@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     domain::storage::DiskBackedRecordStore,
-    network::IDENTIFY_AGENT_STR,
+    network::{multiaddr_is_global, multiaddr_strip_p2p, IDENTIFY_AGENT_STR},
     protocol::{
         messages::{QueryResponse, Request, Response},
         storage::Chunk,
@@ -21,15 +21,15 @@ use crate::{
     },
 };
 
+use itertools::Itertools;
 #[cfg(feature = "local-discovery")]
 use libp2p::mdns;
-
 use libp2p::{
-    autonat,
+    autonat::{self, NatStatus},
     kad::{GetRecordOk, Kademlia, KademliaEvent, QueryResult, K_VALUE},
     multiaddr::Protocol,
     request_response::{self, ResponseChannel as PeerResponseChannel},
-    swarm::{NetworkBehaviour, SwarmEvent},
+    swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
     Multiaddr, PeerId,
 };
 #[cfg(feature = "local-discovery")]
@@ -51,7 +51,7 @@ pub(super) struct NodeBehaviour {
     #[cfg(feature = "local-discovery")]
     pub(super) mdns: mdns::tokio::Behaviour,
     pub(super) identify: libp2p::identify::Behaviour,
-    pub(super) autonat: autonat::Behaviour,
+    pub(super) autonat: Toggle<autonat::Behaviour>,
 }
 
 #[derive(Debug)]
@@ -217,12 +217,29 @@ impl SwarmDriver {
                 }
             },
             SwarmEvent::Behaviour(NodeEvent::Identify(iden)) => {
-                info!("IdentifyEvent: {iden:?}");
                 match *iden {
                     libp2p::identify::Event::Received { peer_id, info } => {
+                        info!(%peer_id, ?info, "identify: received info");
                         if info.agent_version.starts_with(IDENTIFY_AGENT_STR) {
-                            info!("Adding peer to routing table, based on received identify info from {peer_id:?}: {info:?}");
-                            for multiaddr in info.listen_addrs {
+                            let addrs = match self.local {
+                                true => info.listen_addrs,
+                                // If we're not in local mode, only add globally reachable addresses
+                                false => info
+                                    .listen_addrs
+                                    .into_iter()
+                                    .filter(multiaddr_is_global)
+                                    .collect(),
+                            };
+                            // Strip the `/p2p/...` part of the multiaddresses
+                            let addrs: Vec<_> = addrs
+                                .into_iter()
+                                .map(|addr| multiaddr_strip_p2p(&addr))
+                                // And deduplicate the list
+                                .unique()
+                                .collect();
+
+                            info!(%peer_id, ?addrs, "identify: adding addresses");
+                            for multiaddr in addrs {
                                 let _routing_update = self
                                     .swarm
                                     .behaviour_mut()
@@ -231,37 +248,39 @@ impl SwarmDriver {
                             }
                         }
                     }
-                    libp2p::identify::Event::Sent { .. } => {}
-                    libp2p::identify::Event::Pushed { .. } => {}
-                    libp2p::identify::Event::Error { .. } => {}
+                    libp2p::identify::Event::Sent { .. } => info!("identify: {iden:?}"),
+                    libp2p::identify::Event::Pushed { .. } => info!("identify: {iden:?}"),
+                    libp2p::identify::Event::Error { .. } => info!("identify: {iden:?}"),
                 }
             }
             #[cfg(feature = "local-discovery")]
             SwarmEvent::Behaviour(NodeEvent::Mdns(mdns_event)) => match *mdns_event {
                 mdns::Event::Discovered(list) => {
-                    for (peer_id, multiaddr) in list {
-                        info!("Node discovered and dialing: {multiaddr:?}");
+                    if self.local {
+                        for (peer_id, multiaddr) in list {
+                            info!("Node discovered and dialing: {multiaddr:?}");
 
-                        let mut dial_failed = None;
-                        // TODO: Deduplicate this functionality by calling in on SwarmCmd::Dial
-                        if let hash_map::Entry::Vacant(dial_entry) =
-                            self.pending_dial.entry(peer_id)
-                        {
-                            let (sender, _receiver) = oneshot::channel();
-                            let _ = dial_entry.insert(sender);
-                            // TODO: Dropping the receiver immediately might get logged as error later.
-                            if let Err(error) = self
-                                .swarm
-                                .dial(multiaddr.with(Protocol::P2p(peer_id.into())))
+                            let mut dial_failed = None;
+                            // TODO: Deduplicate this functionality by calling in on SwarmCmd::Dial
+                            if let hash_map::Entry::Vacant(dial_entry) =
+                                self.pending_dial.entry(peer_id)
                             {
-                                dial_failed = Some(error);
+                                let (sender, _receiver) = oneshot::channel();
+                                let _ = dial_entry.insert(sender);
+                                // TODO: Dropping the receiver immediately might get logged as error later.
+                                if let Err(error) = self
+                                    .swarm
+                                    .dial(multiaddr.with(Protocol::P2p(peer_id.into())))
+                                {
+                                    dial_failed = Some(error);
+                                }
                             }
-                        }
 
-                        // if we error'd out, send the error back
-                        if let Some(error) = dial_failed {
-                            if let Some(sender) = self.pending_dial.remove(&peer_id) {
-                                let _ = sender.send(Err(error.into()));
+                            // if we error'd out, send the error back
+                            if let Some(error) = dial_failed {
+                                if let Some(sender) = self.pending_dial.remove(&peer_id) {
+                                    let _ = sender.send(Err(error.into()));
+                                }
                             }
                         }
                     }
@@ -334,6 +353,20 @@ impl SwarmDriver {
                 autonat::Event::OutboundProbe(e) => trace!("AutoNAT outbound probe: {e:?}"),
                 autonat::Event::StatusChanged { old, new } => {
                     info!("AutoNAT status changed: {old:?} -> {new:?}");
+
+                    match new {
+                        NatStatus::Public(_addr) => {
+                            // In theory, we could actively push our address to our peers now. But, which peers? All of them?
+                            // Or, should we just wait and let Identify do it on its own? But, what if we are not connected
+                            // to any peers anymore? (E.g., our connections timed out etc)
+                            // let all_peers: Vec<_> = self.swarm.connected_peers().cloned().collect();
+                            // self.swarm.behaviour_mut().identify.push(all_peers);
+                        }
+                        NatStatus::Private => {
+                            // We could just straight out error here. In the future we might try to activate a relay mechanism.
+                        }
+                        NatStatus::Unknown => {}
+                    };
                 }
             },
             todo => error!("SwarmEvent has not been implemented: {todo:?}"),
