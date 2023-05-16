@@ -259,7 +259,7 @@ impl Testnet {
             info!("Peer Id: {}", peer_id);
 
             let genesis_multi_addr = format!(
-                "/ip4/127.0.0.1/udp/{:?}/quic-v1/p2p/{}",
+                "/ip4/127.0.0.1/tcp/{:?}/p2p/{}",
                 genesis_port, peer_id
             );
 
@@ -359,6 +359,7 @@ impl Testnet {
         launch_args.push(node_data_dir_path.clone());
         launch_args.push("--root-dir".to_string());
         launch_args.push(node_data_dir_path);
+        launch_args.push("--local".to_string());
         if let Some(addr) = rpc_address {
             launch_args.push("--rpc".to_string());
             launch_args.push(addr.to_string());
