@@ -258,10 +258,8 @@ impl Testnet {
             let peer_id = captures.get(1).unwrap().as_str();
             info!("Peer Id: {}", peer_id);
 
-            let genesis_multi_addr = format!(
-                "/ip4/127.0.0.1/tcp/{:?}/p2p/{}",
-                genesis_port, peer_id
-            );
+            let genesis_multi_addr =
+                format!("/ip4/127.0.0.1/tcp/{:?}/p2p/{}", genesis_port, peer_id);
 
             Ok(genesis_multi_addr)
         } else {

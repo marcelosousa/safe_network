@@ -289,9 +289,10 @@ impl SwarmDriver {
                     ..Default::default()
                 };
                 Some(libp2p::autonat::Behaviour::new(peer_id, cfg))
-            },
+            }
             false => None,
-        }.into();
+        }
+        .into();
 
         let behaviour = NodeBehaviour {
             request_response,
